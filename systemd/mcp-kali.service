@@ -1,0 +1,22 @@
+[Unit]
+Description=Malformed-MCP Kali MCP bridge (stdio client, kept resident)
+After=mcp-kali-api.service
+Requires=mcp-kali-api.service
+PartOf=malformed-mcp.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/Malformed-MCP/vendor/mcp-kali-server
+# Resident stdio bridge (replaces the old /bin/true placeholder that left the
+# panel showing terminal-security as stopped). The FIFO keeps it up with no
+# client attached; the client talks to the local Flask tools API on :5000.
+ExecStart=/root/Malformed-MCP/scripts/mcp-stdio-run.sh /root/Malformed-MCP/runtime/fifos/kali.fifo /root/Malformed-MCP/vendor/mcp-kali-server/.venv/bin/python /root/Malformed-MCP/vendor/mcp-kali-server/client.py --server http://127.0.0.1:5000
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mcp-kali
+
+[Install]
+WantedBy=multi-user.target

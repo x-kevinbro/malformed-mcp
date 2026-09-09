@@ -1,0 +1,23 @@
+[Unit]
+Description=Malformed-MCP - MCP server and control panel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/Malformed-MCP
+ExecStart=/usr/bin/node /root/Malformed-MCP/dist/index.js
+Restart=always
+RestartSec=3
+# The panel restarts itself by exiting non-zero when systemctl is unavailable,
+# so a clean exit must still be restarted.
+SuccessExitStatus=0
+KillSignal=SIGTERM
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=malformed-mcp
+
+[Install]
+WantedBy=multi-user.target

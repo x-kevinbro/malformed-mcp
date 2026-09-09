@@ -1,0 +1,25 @@
+# Generated. No trailing slash: a symlinked node_modules is still node_modules,
+# and a pattern ending in / matches only a real directory.
+node_modules
+dist/
+
+# Runtime state. This is the whole reason there is no .env any more: tokens,
+# the panel password hash, GitHub profiles and issued certificates are created
+# on the machine that runs the server and must never reach the repository.
+runtime/
+profiles/
+
+# Local noise
+*.log
+*.bak
+*.tmp
+.DS_Store
+
+# Third-party MCP server checkouts (own upstreams, hundreds of MB)
+vendor/
+
+# Filesystem MCP server sandbox
+mcp-workspace/
+
+# Scratch directory for temporary test files, scripts, and logs
+scratch/

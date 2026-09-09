@@ -1,0 +1,21 @@
+[Unit]
+Description=Malformed-MCP filesystem MCP server (stdio, kept resident)
+After=malformed-mcp.service
+PartOf=malformed-mcp.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/Malformed-MCP
+# scripts/mcp-stdio-run.sh feeds the server a never-closing FIFO so a stdio MCP
+# server (which exits on stdin EOF) stays resident under systemd with no client
+# attached. This is what makes the panel's status probe report "running".
+ExecStart=/root/Malformed-MCP/scripts/mcp-stdio-run.sh /root/Malformed-MCP/runtime/fifos/filesystem.fifo /root/Malformed-MCP/node_modules/.bin/mcp-server-filesystem /root/Malformed-MCP/mcp-workspace
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mcp-filesystem
+
+[Install]
+WantedBy=multi-user.target

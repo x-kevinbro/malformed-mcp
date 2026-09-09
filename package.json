@@ -1,0 +1,48 @@
+{
+  "name": "malformed-mcp",
+  "version": "2.0.0",
+  "private": true,
+  "description": "A self-contained MCP server that gives an agent one session over a Linux host.",
+  "type": "module",
+  "main": "dist/index.js",
+  "engines": {
+    "node": ">=20.6"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --import tsx --test test/*.test.ts",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "check": "npm run typecheck && npm run format:check && npm test && npm run build"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.18.0",
+    "@modelcontextprotocol/server-filesystem": "^2026.8.31",
+    "@modelcontextprotocol/server-puppeteer": "^2025.5.12",
+    "@playwright/mcp": "^0.0.78",
+    "compression": "^1.8.0",
+    "cors": "^2.8.5",
+    "execa": "^9.5.2",
+    "express": "^5.2.1",
+    "express-rate-limit": "^8.6.1",
+    "fast-glob": "^3.3.3",
+    "helmet": "^8.0.0",
+    "libsodium-wrappers": "^0.8.4",
+    "pino": "^10.3.1",
+    "pino-http": "^11.0.0",
+    "pino-roll": "^4.0.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/compression": "^1.7.5",
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.6",
+    "@types/libsodium-wrappers": "^0.8.2",
+    "@types/node": "^26.1.2",
+    "pino-pretty": "^13.0.0",
+    "prettier": "^3.9.6",
+    "tsx": "^4.19.2",
+    "typescript": "^7.0.2"
+  }
+}

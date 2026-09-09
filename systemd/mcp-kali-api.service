@@ -1,0 +1,18 @@
+[Unit]
+Description=Malformed-MCP Kali tools API (Flask) on 127.0.0.1:5000
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/Malformed-MCP/vendor/mcp-kali-server
+ExecStart=/root/Malformed-MCP/vendor/mcp-kali-server/.venv/bin/python /root/Malformed-MCP/vendor/mcp-kali-server/server.py --ip 127.0.0.1 --port 5000
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mcp-kali-api
+
+[Install]
+WantedBy=multi-user.target
