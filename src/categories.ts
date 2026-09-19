@@ -70,6 +70,9 @@ export const CATEGORY_DESCRIPTIONS: Record<string, string> = {
   output: "Retrieve truncated results and report what this server can do.",
   audit: "This server's own trail: what it changed, when, and on whose session.",
   github: "The gh_* suite: repositories, files, commits, issues, pull requests, Actions, secrets.",
+  cloud:
+    "Any configured cloud provider API - Vercel, Heroku, Render, DigitalOcean, Linode, Fastly, " +
+    "Cloudflare, Firebase, Turso - called with its stored account credential.",
   security:
     "Assess an allowlisted target: TLS audit, web/vuln scan, content discovery, dependency scan, capped load test.",
   browser: "Drive a real page: navigate, snapshot, click, screenshot, read the console.",

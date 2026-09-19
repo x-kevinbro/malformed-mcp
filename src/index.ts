@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { randomUUID, timingSafeEqual, X509Certificate } from "node:crypto";
 import http from "node:http";
 import https from "node:https";
@@ -15,7 +16,7 @@ import rateLimit from "express-rate-limit";
 import { pinoHttp } from "pino-http";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
-import { config } from "./config.js";
+import { config, ROOT } from "./config.js";
 import { logger, audit } from "./logger.js";
 import { createMcpServer } from "./server.js";
 import { browserStatus, initBrowserBridge, shutdownBrowser } from "./browser/bridge.js";
@@ -32,6 +33,8 @@ import { panelRouter } from "./panel/routes.js";
 import { loadPanel } from "./panel/auth.js";
 import { findByMcpToken } from "./github/store.js";
 import { withLockedProfile } from "./github/accounts.js";
+import { findCloudByMcpToken } from "./providers/store.js";
+import { withLockedCloudAccount } from "./providers/accounts.js";
 import { currentCert } from "./panel/cert.js";
 
 const transports = new Map<string, StreamableHTTPServerTransport>();
@@ -45,6 +48,19 @@ const sessionFile = path.join(config.logDir, "sessions.json");
 const startedAt = new Date().toISOString();
 const previousSessions = readSessionState(sessionFile);
 const liveSessions = new Map<string, string>();
+
+// /health reports the running commit so the panel's update button can tell an
+// update actually landed. Best-effort: a folder installed without git simply
+// keeps the empty gitSha and reports "unknown".
+try {
+  config.gitSha = execFileSync("git", ["-C", ROOT, "rev-parse", "HEAD"], {
+    encoding: "utf8",
+    timeout: 5_000,
+    stdio: ["ignore", "pipe", "ignore"],
+  }).trim();
+} catch {
+  /* no git checkout here, no commit to report */
+}
 
 function persistSessions(): void {
   const sessions = [...liveSessions].map(([id, openedAt]) => ({ id, openedAt }));
@@ -96,8 +112,11 @@ function authenticate(req: Request, res: Response, next: NextFunction): void {
   // the lock below is what stops one agent's credential from reaching another
   // account's repositories.
   const profile = isAdmin ? undefined : findByMcpToken(token);
+  // A cloud account's own token authenticates the same way: locked to that one
+  // provider account, unable to see or name the others.
+  const cloud = isAdmin || profile ? undefined : findCloudByMcpToken(token);
 
-  if (!isAdmin && !profile) {
+  if (!isAdmin && !profile && !cloud) {
     audit("auth_failed", { ip, path: req.path });
     res
       .status(401)
@@ -105,7 +124,7 @@ function authenticate(req: Request, res: Response, next: NextFunction): void {
       .json(
         jsonRpcError(
           -32001,
-          "Unauthorized: send Authorization: Bearer <token>. The panel issues one per GitHub profile.",
+          "Unauthorized: send Authorization: Bearer <token>. The panel issues one per GitHub profile and per cloud account.",
         ),
       );
     return;
@@ -114,6 +133,12 @@ function authenticate(req: Request, res: Response, next: NextFunction): void {
   if (profile) {
     audit("auth_profile", { ip, profile: profile.login });
     withLockedProfile(profile.login, () => next());
+    return;
+  }
+
+  if (cloud) {
+    audit("auth_cloud", { ip, provider: cloud.provider, account: cloud.name });
+    withLockedCloudAccount(cloud.id, () => next());
     return;
   }
 

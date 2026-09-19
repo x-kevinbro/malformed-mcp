@@ -20,6 +20,7 @@ import {
 import { loginPage, page, escapeHtml } from "./ui.js";
 import { allProfiles } from "../github/store.js";
 import { githubApiRouter } from "./github.js";
+import { cloudApiRouter } from "./cloud.js";
 import { settingsRouter, restartPending } from "./settings.js";
 import { preflight, issue, completeDns, currentCert } from "./cert.js";
 import { mcpServers, clientConfigJson } from "./mcp-config.js";
@@ -102,6 +103,7 @@ export function panelRouter(): Router {
 
   // Everything past this point requires a signed-in browser session.
   r.use(githubApiRouter());
+  r.use(cloudApiRouter());
   r.use(settingsRouter());
 
   // --- certificates ---------------------------------------------------------
@@ -221,8 +223,21 @@ export function panelRouter(): Router {
     res.json(await listServerTools(entry, force));
   });
 
-  r.get("/api/mcp-updates", async (_req, res) => {
-    res.json(await Promise.all(mcpServers.map((s) => checkUpdate(s))));
+  r.get("/api/mcp-updates", async (req, res) => {
+    // ?key= narrows the check to one server. The header's update button asks
+    // about this host alone on every page load, and the npm/git probes for
+    // the other servers are not worth paying for that.
+    const key = String(req.query.key ?? "");
+    if (!key) {
+      res.json(await Promise.all(mcpServers.map((s) => checkUpdate(s))));
+      return;
+    }
+    const entry = mcpServers.find((s) => s.key === key);
+    if (!entry) {
+      res.status(404).json({ error: "No such server." });
+      return;
+    }
+    res.json(await checkUpdate(entry));
   });
 
   r.post("/api/mcp-update", async (req, res) => {
@@ -614,6 +629,145 @@ export function panelRouter(): Router {
           if(!confirm('Delete the working tree for '+repo+'? Uncommitted work is lost.'))return;
           await fetch('/api/profiles/'+encodeURIComponent(login)+'/work/'+encodeURIComponent(repo),{method:'DELETE'});
           repos(login);
+        }
+        load();
+        </script>`,
+      ),
+    );
+  });
+
+  r.get("/cloud", (_req, res) => {
+    res.type("html").send(
+      page(
+        "Cloud Providers",
+        "/cloud",
+        `<h1>Cloud Providers</h1>
+        <p class="sub">Add an account with its API token. The credential is verified against the
+        provider when possible and never leaves this server. Each account gets its own MCP token
+        that can only ever act as that account — hand one to an agent and it cannot see or name
+        the others.</p>
+
+        <div class="card">
+          <h2>Add an account</h2>
+          <div id="addmsg" class="msg"></div>
+          <div class="field"><label for="prov">Provider</label>
+            <select id="prov"></select></div>
+          <div class="field"><label for="aname">Account name (optional)</label>
+            <input id="aname" placeholder="Read back from the provider when empty"></div>
+          <div class="field" id="emailfield" style="display:none"><label for="aemail">Account email (global API key only)</label>
+            <input id="aemail" placeholder="you@example.com" autocomplete="off"></div>
+          <div class="field"><label id="toklabel" for="atok">API token</label>
+            <input id="atok" type="password" autocomplete="off">
+            <textarea id="asa" rows="6" style="display:none" placeholder='{"type":"service_account", ...}'></textarea>
+            <p class="sub" style="margin:6px 0 0"><a id="tokurl" href="#" target="_blank" rel="noopener" style="display:none">Where to get this credential</a></p></div>
+          <div class="field"><label class="row" style="gap:8px;margin:0"><input id="aro" type="checkbox" style="width:auto"> Read-only account (GET/HEAD requests only)</label></div>
+          <button id="add">Add account</button>
+        </div>
+
+        <div id="list"></div>
+
+        <script>
+        const listEl=document.getElementById('list'), addmsg=document.getElementById('addmsg');
+        const provSel=document.getElementById('prov'), tok=document.getElementById('atok'),
+              sa=document.getElementById('asa'), toklabel=document.getElementById('toklabel'),
+              tokurl=document.getElementById('tokurl'), emailfield=document.getElementById('emailfield');
+        const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+        function say(el,t,good){el.textContent=t;el.className='msg show '+(good?'good':'err');}
+        let providers=[], accounts=[];
+
+        function syncForm(){
+          const p=providers.find(x=>x.id===provSel.value); if(!p)return;
+          toklabel.textContent=p.tokenLabel;
+          sa.style.display=p.isServiceAccount?'block':'none';
+          tok.style.display=p.isServiceAccount?'none':'block';
+          emailfield.style.display=p.needsEmail?'block':'none';
+          if(p.tokenUrl){tokurl.style.display='inline';tokurl.href=p.tokenUrl;}
+          else tokurl.style.display='none';
+        }
+        provSel.addEventListener('change',syncForm);
+
+        async function load(){
+          let r,d;
+          try{ r=await fetch('/api/cloud',{cache:'no-store'}); d=await r.json(); }
+          catch(e){ listEl.innerHTML='<div class="msg err show">Could not reach the server to list accounts.</div>'; return; }
+          if(r.status===401){
+            listEl.innerHTML='<div class="msg err show">Your session has expired. <a href="/login">Sign in again</a>.</div>'; return; }
+          if(!r.ok){
+            listEl.innerHTML='<div class="msg err show">'+esc((d&&d.error)||('The server answered '+r.status+'.'))+'</div>'; return; }
+
+          providers=d.providers||[]; accounts=d.accounts||[];
+          if(!provSel.options.length){
+            provSel.innerHTML=providers.map(p=>'<option value="'+esc(p.id)+'">'+esc(p.name)+'</option>').join('');
+            syncForm();
+          }
+
+          if(!accounts.length){
+            listEl.innerHTML='<div class="card"><p class="sub" style="margin:0">No cloud accounts yet.</p></div>';return;}
+
+          listEl.innerHTML=accounts.map((a,i)=>{
+            const pname=(providers.find(p=>p.id===a.provider)||{}).name||a.provider;
+            const badges=[a.isDefault?'<span class="badge up">default</span>':'',
+              a.readOnly?'<span class="badge">read-only</span>':'<span class="badge up">writable</span>',
+              a.verified?'':'<span class="badge unknown">unverified</span>'].filter(Boolean).join(' ');
+            return \`<div class="card">
+              <div class="row" style="justify-content:space-between">
+                <div><h2 style="margin:0">\${esc(a.name)}</h2>
+                  <div class="sub" style="margin:4px 0 0">\${esc(pname)} &middot; added \${esc(String(a.createdAt||'').slice(0,10))}</div>
+                  <div class="row" style="margin-top:8px">\${badges}</div></div>
+                <div class="row">
+                  \${a.isDefault?'':\`<button class="btn-sm" onclick="makedefault(\${i})">Make default</button>\`}
+                  <button class="btn-sm btn-ghost" onclick="setro(\${i})">\${a.readOnly?'Make writable':'Make read-only'}</button>
+                  <button class="btn-sm btn-ghost" onclick="rotate(\${i})">Rotate token</button>
+                  <button class="btn-sm btn-danger" onclick="del(\${i})">Remove</button>
+                </div>
+              </div>
+              <div class="field" style="margin-top:14px"><label>MCP token for this account</label>
+                <div class="row">
+                  <input id="mcp-\${i}" readonly value="\${esc(a.mcpToken)}" onclick="this.select()" style="flex:1">
+                  <button class="btn-sm btn-ghost" onclick="copytok(\${i})">Copy</button>
+                </div></div>
+            </div>\`;
+          }).join('');
+        }
+
+        async function copytok(i){
+          const el=document.getElementById('mcp-'+i); el.select();
+          try{ await navigator.clipboard.writeText(el.value); say(addmsg,'MCP token for '+accounts[i].name+' copied.',true); }
+          catch(e){ say(addmsg,'MCP token for '+accounts[i].name+' selected — press Ctrl+C to copy it.',true); }
+        }
+
+        document.getElementById('add').addEventListener('click',async()=>{
+          const p=providers.find(x=>x.id===provSel.value);
+          const btn=document.getElementById('add'); btn.disabled=true;
+          const r=await fetch('/api/cloud/accounts',{method:'POST',headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({provider:provSel.value,
+              token:(p&&p.isServiceAccount?sa.value:tok.value),
+              name:document.getElementById('aname').value,
+              email:document.getElementById('aemail').value,
+              readOnly:document.getElementById('aro').checked})});
+          const d=await r.json().catch(()=>({})); btn.disabled=false;
+          if(r.ok){
+            say(addmsg,'Added '+d.name+(d.verified?' - credential verified.':' - stored without verification (the provider check could not confirm it).'),true);
+            tok.value='';sa.value='';document.getElementById('aname').value='';document.getElementById('aemail').value='';
+            load();
+          }
+          else say(addmsg,d.error||'Could not add that account.');
+        });
+
+        const urlFor=a=>'/api/cloud/accounts/'+encodeURIComponent(a.provider)+'/'+encodeURIComponent(a.slug);
+        async function makedefault(i){ await fetch(urlFor(accounts[i])+'/default',{method:'POST'}); load(); }
+        async function setro(i){
+          const a=accounts[i];
+          await fetch(urlFor(a)+'/readonly',{method:'POST',
+            headers:{'Content-Type':'application/json'},body:JSON.stringify({readOnly:!a.readOnly})}); load();
+        }
+        async function rotate(i){
+          if(!confirm('Rotate the MCP token for '+accounts[i].name+'? Agents using the old one stop working.'))return;
+          await fetch(urlFor(accounts[i])+'/rotate',{method:'POST'}); load();
+        }
+        async function del(i){
+          if(!confirm('Remove '+accounts[i].name+'? The provider credential and its MCP token are deleted.'))return;
+          await fetch(urlFor(accounts[i]),{method:'DELETE'}); load();
         }
         load();
         </script>`,

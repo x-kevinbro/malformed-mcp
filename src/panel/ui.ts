@@ -143,6 +143,16 @@ pre.cfg{background:var(--bg);border:1px solid var(--line);border-radius:8px;padd
 .badge.up{color:#7ee787;border-color:#2ea04366;background:#2ea04322}
 .badge.down{color:#ff7b72;border-color:#f8514966;background:#f8514922}
 .badge.unknown{color:var(--muted)}
+
+/* The header's one-click update button: a dot when a newer commit exists, an
+   overlay while the server rebuilds and restarts underneath the page. */
+a#self-update{position:relative}
+a#self-update #updot{display:none;position:absolute;top:7px;right:7px;width:7px;height:7px;border-radius:50%;background:var(--warn)}
+#update-overlay{position:fixed;inset:0;background:rgba(4,8,12,.75);display:flex;align-items:center;justify-content:center;z-index:60;padding:20px}
+#update-overlay .ubox{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:22px;max-width:560px;width:100%}
+#update-overlay .ubox h2{margin:0 0 8px}
+#update-overlay .ulog{color:var(--muted);font-size:13px;white-space:pre-wrap;word-break:break-word;max-height:40vh;overflow:auto;margin:0}
+#update-overlay .ubox button{margin-top:14px}
 `;
 
 /**
@@ -175,9 +185,96 @@ const BUSY_SCRIPT = `<script>
 })();
 <\/script>`;
 
+/**
+ * One-click self-update, on every page. The dot appears when the server
+ * reports a newer upstream commit; the click pulls, rebuilds and restarts it,
+ * and the page reloads itself once /health answers from the new build. The
+ * restart can kill the in-flight response to the update call, which is why a
+ * dropped connection is treated as progress rather than failure.
+ */
+const UPDATE_SCRIPT = `<script>
+(function(){
+  var btn=document.getElementById('self-update');
+  if(!btn) return;
+  var dot=document.getElementById('updot');
+  var status=null;
+  var beforeCommit=null;
+
+  fetch('/api/mcp-updates?key=malformed-mcp',{cache:'no-store'}).then(function(r){return r.json();}).then(function(s){
+    status=s;
+    if(s&&s.current)beforeCommit=s.current;
+    if(s&&s.updateAvailable){dot.style.display='block';btn.title=s.note||'Update available';}
+  }).catch(function(){});
+
+  function closeOverlay(){
+    var o=document.getElementById('update-overlay'); if(o) o.remove();
+  }
+  function overlay(title,msg,isErr){
+    closeOverlay();
+    var o=document.createElement('div'); o.id='update-overlay';
+    var b=document.createElement('div'); b.className='ubox';
+    var h=document.createElement('h2'); h.textContent=title;
+    var p=document.createElement('pre'); p.className='ulog'; p.textContent=msg;
+    b.appendChild(h); b.appendChild(p);
+    if(isErr){
+      var c=document.createElement('button'); c.textContent='Close';
+      c.addEventListener('click',closeOverlay); b.appendChild(c);
+    }
+    o.appendChild(b); document.body.appendChild(o);
+  }
+
+  function waitForReturn(){
+    var deadline=Date.now()+240000;
+    // The restart fires 2s after the update response; give it a head start so
+    // the first poll does not reload against the still-old process.
+    setTimeout(poll,8000);
+    function poll(){
+      fetch('/health',{cache:'no-store'}).then(function(r){return r.json();}).then(function(h){
+        // A changed commit is the positive signal. When either side reports
+        // "unknown" (a non-git install) there is nothing to compare, and
+        // having seen the update response means the restart already fired.
+        if(!beforeCommit||beforeCommit==='unknown'||!h.commit||h.commit==='unknown'||h.commit!==beforeCommit){
+          location.reload(); return;
+        }
+        again();
+      }).catch(function(){ again(); });
+      function again(){
+        if(Date.now()>deadline){
+          overlay('Still updating','The server has not settled for 4 minutes. On the host, check: journalctl -u malformed-mcp -f',true);
+          return;
+        }
+        setTimeout(poll,3000);
+      }
+    }
+  }
+
+  btn.addEventListener('click',function(e){
+    e.preventDefault();
+    var s=status||{};
+    var msg=s.updateAvailable
+      ?'Update to the latest commit ('+(s.current||'?')+' → '+(s.latest||'?')+')?\\n\\nThe server rebuilds and restarts; this page reloads itself when it is back.'
+      :'This server already reports up to date'+(s.current?' ('+s.current+')':'')+'.\\n\\nPull, rebuild and restart anyway?';
+    if(!confirm(msg)) return;
+    overlay('Updating','Pulling the latest commit, installing dependencies, rebuilding. Usually a minute or two.');
+    fetch('/api/mcp-update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key:'malformed-mcp'})})
+      .then(function(r){return r.json().then(function(d){return {ok:r.ok,log:(d&&d.log)||''};});})
+      .then(function(res){
+        if(!res.ok){overlay('Update failed',res.log||'Unknown error.',true);return;}
+        overlay('Update installed','The server is restarting; waiting for it to come back…');
+        waitForReturn();
+      })
+      .catch(function(){
+        overlay('Restarting','The connection dropped, which usually means the restart has begun.');
+        waitForReturn();
+      });
+  });
+})();
+<\/script>`;
+
 const TABS: Array<[string, string]> = [
   ["/", "Dashboard"],
   ["/profiles", "GitHub Profiles"],
+  ["/cloud", "Cloud Providers"],
   ["/mcp-config", "MCP Servers"],
   ["/settings", "Settings"],
   ["/certificate", "Certificate"],
@@ -205,11 +302,12 @@ export function page(title: string, active: string, body: string): string {
 </head><body>
 <header class="topbar">
   <div class="brand"><span class="mark">MALFORMED</span><span>MCP</span></div>
-  <nav class="tabs">${tabs}<a href="/logout">Sign out</a></nav>
+  <nav class="tabs">${tabs}<a href="#" id="self-update" title="Check for updates">Update<span id="updot"></span></a><a href="/logout">Sign out</a></nav>
 </header>
 <main>${body}</main>
 ${footer()}
 ${BUSY_SCRIPT}
+${UPDATE_SCRIPT}
 </body></html>`;
 }
 

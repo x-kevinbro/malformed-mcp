@@ -15,6 +15,7 @@ import { registerOutputTools } from "./tools/output.js";
 import { registerBrowserTools } from "./tools/browser.js";
 import { registerAuditTools } from "./tools/audit.js";
 import { registerGithubTools } from "./tools/github/index.js";
+import { registerCloudTools } from "./tools/cloud.js";
 import { registerSecurityTools } from "./tools/security.js";
 import { registerLoaderTools } from "./tools/loader.js";
 import { registerProxyTools } from "./tools/proxy.js";
@@ -42,6 +43,7 @@ const REGISTRARS: Array<[string, (server: McpServer) => void]> = [
   ["output", registerOutputTools],
   ["audit", registerAuditTools],
   ["github", registerGithubTools],
+  ["cloud", registerCloudTools],
   ["security", registerSecurityTools],
   // Reads the cache the bridge filled at startup; a no-op when the browser is
   // disabled or the handshake failed.
@@ -72,6 +74,10 @@ How to work
   docker_logs, compose, journal, db_query.
 - Reaching the internet: http_request fetches any URL (docs, APIs, release feeds) and renders HTML
   as readable text; download_file streams a URL to disk and returns its SHA-256.
+- Cloud providers: cloud_request makes authenticated calls to any configured provider API
+  (Vercel, Heroku, Render, DigitalOcean, Linode, Fastly, Cloudflare, Firebase, Turso).
+  cloud_providers lists the providers and which accounts are configured; the panel's Cloud
+  Providers tab is where accounts are added.
 - Moving files: write_file with encoding=base64 puts a file on the host, read_file with
   encoding=base64 takes one off it.
 - search_files uses extended regular expressions. Pass literal:true to match punctuation exactly.

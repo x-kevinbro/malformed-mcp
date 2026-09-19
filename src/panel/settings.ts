@@ -89,6 +89,7 @@ export const CATEGORIES: Array<{ name: string; blurb: string; fields: Field[] }>
       },
       { key: "hostReadOnly", label: "Read-only (this host)", type: "boolean" },
       { key: "githubReadOnly", label: "Read-only (GitHub)", type: "boolean" },
+      { key: "cloudReadOnly", label: "Read-only (cloud providers)", type: "boolean" },
       { key: "redactOutput", label: "Redact secrets from output", type: "boolean" },
       { key: "net.allowHosts", label: "Network allowlist", type: "list" },
       { key: "net.denyHosts", label: "Network denylist", type: "list" },
