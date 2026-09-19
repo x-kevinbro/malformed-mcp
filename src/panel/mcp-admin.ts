@@ -17,6 +17,7 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { audit } from "../logger.js";
+import { ROOT } from "../config.js";
 import { listAllTools } from "../server.js";
 import type { McpServerEntry } from "./mcp-config.js";
 
@@ -186,12 +187,42 @@ export async function checkUpdate(
           : `Latest published is ${latest}. Update to fetch it.`,
       };
     } else {
-      status = {
-        key: entry.key,
-        kind: "self",
-        updateAvailable: false,
-        note: "This host updates by rebuilding and redeploying its own code.",
-      };
+      // self: this host. install.sh clones the repo into the install folder,
+      // so the same fetch-and-compare works - against ROOT rather than a
+      // vendored checkout. A folder dropped here without .git cannot diff
+      // itself against upstream and says so instead.
+      if (!existsSync(path.join(ROOT, ".git"))) {
+        status = {
+          key: entry.key,
+          kind: "self",
+          updateAvailable: false,
+          note: "Installed without git - reinstall with install.sh to enable updates.",
+        };
+      } else {
+        try {
+          await pexec("git", ["-C", ROOT, "fetch", "--quiet"], { timeout: 45_000 });
+        } catch {
+          // Ignore fetch error, check current local HEAD
+        }
+        const cur = (await pexec("git", ["-C", ROOT, "rev-parse", "HEAD"])).stdout.trim();
+        let upstream = cur;
+        try {
+          upstream = (await pexec("git", ["-C", ROOT, "rev-parse", "@{u}"])).stdout.trim();
+        } catch {
+          // No upstream tracking branch: report as up to date with itself.
+        }
+        const behind = cur !== upstream;
+        status = {
+          key: entry.key,
+          kind: "self",
+          current: cur.slice(0, 7),
+          latest: upstream.slice(0, 7),
+          updateAvailable: behind,
+          note: behind
+            ? `A newer commit is available (${cur.slice(0, 7)} -> ${upstream.slice(0, 7)}).`
+            : `Up to date (${cur.slice(0, 7)}).`,
+        };
+      }
     }
   } catch (error) {
     status = {
@@ -210,12 +241,6 @@ export async function applyUpdate(
   entry: McpServerEntry,
 ): Promise<{ ok: boolean; log: string }> {
   const u = entry.update;
-  if (u.type === "self") {
-    return {
-      ok: false,
-      log: "This host is updated by rebuilding and redeploying its own code, not from the panel.",
-    };
-  }
 
   const log: string[] = [];
   const run = async (cmd: string, args: string[]) => {
@@ -230,6 +255,46 @@ export async function applyUpdate(
   };
 
   try {
+    if (u.type === "self") {
+      // This host updates itself from the same git clone install.sh made:
+      // pull, rebuild, restart. Deliberately NOT deploy.sh - that script also
+      // resets the panel password and re-runs cert issuance, neither of which
+      // a one-click update may surprise the operator with.
+      if (!existsSync(path.join(ROOT, ".git"))) {
+        return {
+          ok: false,
+          log: "This folder has no git checkout, so there is nothing to pull from. " +
+            "Reinstall with install.sh and future updates work from this button.",
+        };
+      }
+      await run("git", ["-C", ROOT, "pull", "--ff-only"]);
+      await run("npm", ["install", "--prefix", ROOT, "--no-fund", "--no-audit"]);
+      await run("npm", ["run", "build", "--prefix", ROOT]);
+      toolsCache.delete(entry.key);
+      updateCache.delete(entry.key);
+      audit("mcp_server_updated", { key: entry.key, kind: u.type });
+
+      // The restart kills this process, so it is scheduled rather than
+      // awaited: this response leaves first, and the panel polls /health until
+      // the new build answers. Without systemd nothing supervises a restart,
+      // so say what to run instead of dying quietly.
+      const unit = entry.service ?? "malformed-mcp.service";
+      if (existsSync("/run/systemd/system")) {
+        setTimeout(() => {
+          execFile("systemctl", ["restart", unit], () => {});
+        }, 2_000).unref();
+        return {
+          ok: true,
+          log: `${log.join("\n\n")}\n\nUpdate installed - restarting ${unit} now.`,
+        };
+      }
+      return {
+        ok: true,
+        log:
+          `${log.join("\n\n")}\n\nUpdate installed, but systemd is not available. ` +
+          `Restart manually: pkill -f "node dist/index.js", then start dist/index.js again.`,
+      };
+    }
     if (u.type === "git") {
       await run("git", ["-C", u.dir, "pull", "--ff-only"]);
       const pip = `${u.dir}/.venv/bin/pip`;

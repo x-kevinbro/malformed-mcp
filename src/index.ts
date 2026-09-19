@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { randomUUID, timingSafeEqual, X509Certificate } from "node:crypto";
 import http from "node:http";
 import https from "node:https";
@@ -15,7 +16,7 @@ import rateLimit from "express-rate-limit";
 import { pinoHttp } from "pino-http";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
-import { config } from "./config.js";
+import { config, ROOT } from "./config.js";
 import { logger, audit } from "./logger.js";
 import { createMcpServer } from "./server.js";
 import { browserStatus, initBrowserBridge, shutdownBrowser } from "./browser/bridge.js";
@@ -47,6 +48,19 @@ const sessionFile = path.join(config.logDir, "sessions.json");
 const startedAt = new Date().toISOString();
 const previousSessions = readSessionState(sessionFile);
 const liveSessions = new Map<string, string>();
+
+// /health reports the running commit so the panel's update button can tell an
+// update actually landed. Best-effort: a folder installed without git simply
+// keeps the empty gitSha and reports "unknown".
+try {
+  config.gitSha = execFileSync("git", ["-C", ROOT, "rev-parse", "HEAD"], {
+    encoding: "utf8",
+    timeout: 5_000,
+    stdio: ["ignore", "pipe", "ignore"],
+  }).trim();
+} catch {
+  /* no git checkout here, no commit to report */
+}
 
 function persistSessions(): void {
   const sessions = [...liveSessions].map(([id, openedAt]) => ({ id, openedAt }));

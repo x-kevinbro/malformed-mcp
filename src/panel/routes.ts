@@ -223,8 +223,21 @@ export function panelRouter(): Router {
     res.json(await listServerTools(entry, force));
   });
 
-  r.get("/api/mcp-updates", async (_req, res) => {
-    res.json(await Promise.all(mcpServers.map((s) => checkUpdate(s))));
+  r.get("/api/mcp-updates", async (req, res) => {
+    // ?key= narrows the check to one server. The header's update button asks
+    // about this host alone on every page load, and the npm/git probes for
+    // the other servers are not worth paying for that.
+    const key = String(req.query.key ?? "");
+    if (!key) {
+      res.json(await Promise.all(mcpServers.map((s) => checkUpdate(s))));
+      return;
+    }
+    const entry = mcpServers.find((s) => s.key === key);
+    if (!entry) {
+      res.status(404).json({ error: "No such server." });
+      return;
+    }
+    res.json(await checkUpdate(entry));
   });
 
   r.post("/api/mcp-update", async (req, res) => {
