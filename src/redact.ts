@@ -15,6 +15,7 @@
 
 import { config } from "./config.js";
 import { allTokens } from "./github/store-tokens.js";
+import { allTokens as allCloudTokens } from "./providers/store-tokens.js";
 
 type Rule = { pattern: RegExp; replacement: string };
 
@@ -63,7 +64,7 @@ function escapeRegExp(value: string): string {
  * src/config.ts now, so the bearer token is the one literal worth knowing.
  */
 function literalSecrets(): string[] {
-  return [config.token, ...allTokens()]
+  return [config.token, ...allTokens(), ...allCloudTokens()]
     .filter((value) => value.length >= 12)
     .sort((a, b) => b.length - a.length);
 }

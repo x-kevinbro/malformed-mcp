@@ -178,6 +178,7 @@ const BUSY_SCRIPT = `<script>
 const TABS: Array<[string, string]> = [
   ["/", "Dashboard"],
   ["/profiles", "GitHub Profiles"],
+  ["/cloud", "Cloud Providers"],
   ["/mcp-config", "MCP Servers"],
   ["/settings", "Settings"],
   ["/certificate", "Certificate"],

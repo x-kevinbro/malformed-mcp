@@ -139,6 +139,13 @@ export function assertGithubWritable(tool: string): void {
   }
 }
 
+/** Guard for anything that mutates state at a cloud provider rather than on this host. */
+export function assertCloudWritable(tool: string): void {
+  if (config.cloudReadOnly) {
+    throw new ReadOnlyError(tool, config.readOnly ? "readOnly" : "cloudReadOnly");
+  }
+}
+
 export function errorText(error: unknown): string {
   if (error instanceof Error) return error.message;
   return String(error);

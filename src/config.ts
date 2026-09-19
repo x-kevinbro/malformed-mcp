@@ -71,6 +71,8 @@ const defaults = {
   readOnly: false,
   hostReadOnly: false,
   githubReadOnly: false,
+  /** Read-only grade for cloud provider calls: blocks non-GET cloud_request. */
+  cloudReadOnly: false,
   dnsRebindProtection: false,
   trustProxy: 1,
   jsonResponse: false,
@@ -191,6 +193,21 @@ const defaults = {
   /** Where the panel persists GitHub profiles and their per-profile MCP tokens. */
   profileStore: runtime("profiles.json"),
 
+  /** Where the panel persists cloud provider accounts and their per-account MCP tokens. */
+  providerStore: runtime("providers.json"),
+
+  /**
+   * Cloud provider calls (cloud_request). Accounts and their tokens live in
+   * the provider store, written by the panel; these are only the
+   * transport-level knobs shared by every provider.
+   */
+  cloud: {
+    timeoutMs: 30_000,
+    maxRetries: 2,
+    /** Response bodies are cut at this size before the tool's own clamp runs. */
+    maxBytes: 1_000_000,
+  },
+
   github: {
     token: "",
     repo: "",
@@ -254,6 +271,7 @@ config.logDir = defaults.logDir;
 config.backupDir = defaults.backupDir;
 config.profilesDir = defaults.profilesDir;
 config.profileStore = defaults.profileStore;
+config.providerStore = defaults.providerStore;
 config.panel.store = defaults.panel.store;
 config.panel.certDir = defaults.panel.certDir;
 config.browser.outputDir = defaults.browser.outputDir;

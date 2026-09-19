@@ -32,6 +32,8 @@ import { panelRouter } from "./panel/routes.js";
 import { loadPanel } from "./panel/auth.js";
 import { findByMcpToken } from "./github/store.js";
 import { withLockedProfile } from "./github/accounts.js";
+import { findCloudByMcpToken } from "./providers/store.js";
+import { withLockedCloudAccount } from "./providers/accounts.js";
 import { currentCert } from "./panel/cert.js";
 
 const transports = new Map<string, StreamableHTTPServerTransport>();
@@ -96,8 +98,11 @@ function authenticate(req: Request, res: Response, next: NextFunction): void {
   // the lock below is what stops one agent's credential from reaching another
   // account's repositories.
   const profile = isAdmin ? undefined : findByMcpToken(token);
+  // A cloud account's own token authenticates the same way: locked to that one
+  // provider account, unable to see or name the others.
+  const cloud = isAdmin || profile ? undefined : findCloudByMcpToken(token);
 
-  if (!isAdmin && !profile) {
+  if (!isAdmin && !profile && !cloud) {
     audit("auth_failed", { ip, path: req.path });
     res
       .status(401)
@@ -105,7 +110,7 @@ function authenticate(req: Request, res: Response, next: NextFunction): void {
       .json(
         jsonRpcError(
           -32001,
-          "Unauthorized: send Authorization: Bearer <token>. The panel issues one per GitHub profile.",
+          "Unauthorized: send Authorization: Bearer <token>. The panel issues one per GitHub profile and per cloud account.",
         ),
       );
     return;
@@ -114,6 +119,12 @@ function authenticate(req: Request, res: Response, next: NextFunction): void {
   if (profile) {
     audit("auth_profile", { ip, profile: profile.login });
     withLockedProfile(profile.login, () => next());
+    return;
+  }
+
+  if (cloud) {
+    audit("auth_cloud", { ip, provider: cloud.provider, account: cloud.name });
+    withLockedCloudAccount(cloud.id, () => next());
     return;
   }
 
