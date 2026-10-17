@@ -57,6 +57,13 @@ export function resolveTarget(spec: ProviderSpec, rawPath: string): string {
       `Refusing to send ${spec.name} credentials over ${url.protocol} - https only.`,
     );
   }
+  if (url.username || url.password)
+    throw new Error("API URLs must not contain credentials.");
+  if (spec.origins && !spec.origins.includes(url.origin)) {
+    throw new Error(
+      "This custom credential may only be sent to its configured HTTPS origin.",
+    );
+  }
   if (!spec.hosts.some((pattern) => hostMatches(url.hostname, pattern))) {
     throw new Error(
       `${url.hostname} is not a ${spec.name} API host. This account's credential may only be ` +
@@ -162,7 +169,9 @@ export async function authHeaders(
     case "bearer":
       return { Authorization: `Bearer ${account.token}` };
     case "header":
-      return { [style.header]: account.token };
+      return {
+        [style.header]: `${style.prefix ? style.prefix + " " : ""}${account.token}`,
+      };
     case "email_key":
       return {
         "X-Auth-Email": account.extra?.email ?? "",
@@ -245,6 +254,7 @@ export async function cloudFetch(
     try {
       response = await fetch(target, {
         method: request.method,
+        redirect: "error", // never forward a custom auth header to a redirect target
         headers,
         body:
           request.body === undefined ? undefined : JSON.stringify(request.body),

@@ -12,11 +12,13 @@
  * process toward one of these hosts.
  */
 
+import { allAccounts } from "./store.js";
+
 export type AuthStyle =
   /** Authorization: Bearer <token> */
   | { type: "bearer" }
   /** A single custom header, e.g. Fastly-Key: <token> */
-  | { type: "header"; header: string }
+  | { type: "header"; header: string; prefix?: string }
   /** Cloudflare global API key: X-Auth-Email + X-Auth-Key. */
   | { type: "email_key" }
   /**
@@ -42,6 +44,8 @@ export type ProviderSpec = {
   baseUrl: string;
   /** Hosts a credential may be sent to. Globs like "*.googleapis.com" allowed. */
   hosts: string[];
+  /** Exact credential destinations for operator-defined providers (including port). */
+  origins?: string[];
   /** Supported auth styles, most-preferred first. */
   auth: AuthStyle[];
   /** Static headers every request carries (Heroku's versioned Accept, etc). */
@@ -57,6 +61,16 @@ export type ProviderSpec = {
 };
 
 export const PROVIDERS: ProviderSpec[] = [
+  {
+    id: "koyeb",
+    name: "Koyeb",
+    baseUrl: "https://app.koyeb.com/v1",
+    hosts: ["app.koyeb.com"],
+    auth: [{ type: "bearer" }],
+    tokenLabel: "Koyeb access token",
+    tokenUrl: "https://app.koyeb.com",
+    docsUrl: "https://www.koyeb.com/docs/reference/api",
+  },
   {
     id: "vercel",
     name: "Vercel",
@@ -172,15 +186,24 @@ export const PROVIDERS: ProviderSpec[] = [
   },
 ];
 
-const byId = new Map(PROVIDERS.map((p) => [p.id, p]));
+/** Custom definitions are added only by a signed-in panel operator, never by a tool. */
+export function allProviderSpecs(): ProviderSpec[] {
+  const specs = new Map(PROVIDERS.map((p) => [p.id, p]));
+  for (const account of allAccounts()) {
+    const spec = account.customProvider;
+    if (spec?.id === account.provider && !specs.has(spec.id))
+      specs.set(spec.id, spec);
+  }
+  return [...specs.values()];
+}
 
-/** The spec for a provider id, or an error naming the ones that exist. */
+/** The spec for a built-in or configured custom provider. */
 export function providerSpec(id: string): ProviderSpec {
-  const spec = byId.get(id.trim().toLowerCase());
+  const spec = allProviderSpecs().find((p) => p.id === id.trim().toLowerCase());
   if (!spec) {
     throw new Error(
-      `Unknown provider "${id}". This server knows: ${PROVIDERS.map((p) => p.id).join(", ")}. ` +
-        `Adding a new one is one entry in src/providers/spec.ts.`,
+      `Unknown provider "${id}". Open the panel's Cloud Providers tab and select a provider ` +
+        `or add a Custom API. Never paste credentials into chat or tool arguments.`,
     );
   }
   return spec;

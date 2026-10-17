@@ -25,15 +25,31 @@ type Rule = { pattern: RegExp; replacement: string };
  */
 const RULES: Rule[] = [
   {
-    pattern: /-----BEGIN[ A-Z]*PRIVATE KEY-----[\s\S]*?-----END[ A-Z]*PRIVATE KEY-----/g,
+    pattern:
+      /-----BEGIN[ A-Z]*PRIVATE KEY-----[\s\S]*?-----END[ A-Z]*PRIVATE KEY-----/g,
     replacement: "[redacted:private-key]",
   },
-  { pattern: /\bgithub_pat_[A-Za-z0-9_]{20,}/g, replacement: "[redacted:github-pat]" },
-  { pattern: /\bgh[pousr]_[A-Za-z0-9]{16,}/g, replacement: "[redacted:github-token]" },
-  { pattern: /\bxox[baprse]-[A-Za-z0-9-]{10,}/g, replacement: "[redacted:slack-token]" },
-  { pattern: /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g, replacement: "[redacted:aws-key-id]" },
+  {
+    pattern: /\bgithub_pat_[A-Za-z0-9_]{20,}/g,
+    replacement: "[redacted:github-pat]",
+  },
+  {
+    pattern: /\bgh[pousr]_[A-Za-z0-9]{16,}/g,
+    replacement: "[redacted:github-token]",
+  },
+  {
+    pattern: /\bxox[baprse]-[A-Za-z0-9-]{10,}/g,
+    replacement: "[redacted:slack-token]",
+  },
+  {
+    pattern: /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g,
+    replacement: "[redacted:aws-key-id]",
+  },
   { pattern: /\bsk-[A-Za-z0-9]{20,}/g, replacement: "[redacted:api-key]" },
-  { pattern: /\b\d{8,10}:AA[A-Za-z0-9_-]{30,}/g, replacement: "[redacted:telegram-token]" },
+  {
+    pattern: /\b\d{8,10}:AA[A-Za-z0-9_-]{30,}/g,
+    replacement: "[redacted:telegram-token]",
+  },
   {
     pattern: /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g,
     replacement: "[redacted:jwt]",
@@ -65,20 +81,45 @@ function escapeRegExp(value: string): string {
  */
 function literalSecrets(): string[] {
   return [config.token, ...allTokens(), ...allCloudTokens()]
-    .filter((value) => value.length >= 12)
+    .filter((value) => value.length > 0)
+    .flatMap((value) => [
+      value,
+      JSON.stringify(value).slice(1, -1),
+      encodeURIComponent(value),
+    ])
+    .filter((value, index, values) => values.indexOf(value) === index)
     .sort((a, b) => b.length - a.length);
 }
 
 let literals: RegExp[] | undefined;
+let cachedSecrets: string[] = [];
 
 function literalRules(): RegExp[] {
-  literals ??= literalSecrets().map((value) => new RegExp(escapeRegExp(value), "g"));
+  // Panel edits take effect without a restart. A cached token list must never
+  // leave newly added or rotated (including opaque/non-standard) secrets exposed.
+  const current = literalSecrets();
+  if (
+    !literals ||
+    current.length !== cachedSecrets.length ||
+    current.some((value, index) => value !== cachedSecrets[index])
+  ) {
+    cachedSecrets = current;
+    literals = current.map((value) => new RegExp(escapeRegExp(value), "g"));
+  }
   return literals;
 }
 
 /** Recompute the known-literal list, for tests and after a credential changes. */
 export function resetRedactionCache(): void {
   literals = undefined;
+}
+
+/** Stored credentials are always secret, even when heuristic scrubbing is disabled. */
+export function redactStoredSecrets(text: string): string {
+  let out = text;
+  for (const literal of literalRules())
+    out = out.replace(literal, "[redacted:config-secret]");
+  return out;
 }
 
 /**
@@ -90,8 +131,7 @@ export function redactSecrets(text: string): string {
 
   let out = text;
   for (const rule of RULES) out = out.replace(rule.pattern, rule.replacement);
-  for (const literal of literalRules()) out = out.replace(literal, "[redacted:config-secret]");
-  return out;
+  return redactStoredSecrets(out);
 }
 
 /** True when scrubbing would change the text. Used to annotate results. */

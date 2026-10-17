@@ -1,11 +1,15 @@
 import { clamp, formatResult, type ExecResult } from "./exec.js";
 import { config } from "./config.js";
-import { redactSecrets } from "./redact.js";
+import { redactSecrets, redactStoredSecrets } from "./redact.js";
 import { compact, estimateTokens } from "./compress.js";
 import { saveOutput } from "./output-store.js";
 
 export type TextContentBlock = { type: "text"; text: string };
-export type ImageContentBlock = { type: "image"; data: string; mimeType: string };
+export type ImageContentBlock = {
+  type: "image";
+  data: string;
+  mimeType: string;
+};
 export type ToolResult = {
   content: Array<TextContentBlock | ImageContentBlock>;
   isError?: boolean;
@@ -36,7 +40,10 @@ const REPORT_SAVING_OVER = 600;
  */
 function render(text: string, max?: number): string {
   const limit = max ?? config.maxOutput;
-  const scrubbed = config.redactOutput ? redactSecrets(text) : text;
+  // The switch controls heuristic matching, not exposure of stored credentials.
+  const scrubbed = config.redactOutput
+    ? redactSecrets(text)
+    : redactStoredSecrets(text);
   const compacted = compact(scrubbed, config.compactOutput);
   const saved = scrubbed.length - compacted.length;
 
@@ -64,7 +71,9 @@ function render(text: string, max?: number): string {
   const head = Math.ceil(room * 0.7);
   const tail = room - head;
 
-  return compacted.slice(0, head) + notice + compacted.slice(compacted.length - tail);
+  return (
+    compacted.slice(0, head) + notice + compacted.slice(compacted.length - tail)
+  );
 }
 
 export function ok(text: string, max?: number): ToolResult {
@@ -77,7 +86,8 @@ export function fail(text: string): ToolResult {
 
 /** Image results bypass render(): base64 must not be redacted, compacted or clamped. */
 export function okImage(
-  dataOrImages: string | Array<{ data: string; mimeType: string; note?: string }>,
+  dataOrImages:
+    string | Array<{ data: string; mimeType: string; note?: string }>,
   mimeType?: string,
   note?: string,
 ): ToolResult {
@@ -101,7 +111,11 @@ export function okImage(
 }
 
 /** Map a shell result onto a tool result, treating non-zero exit as an error. */
-export function fromExec(result: ExecResult, header?: string, max?: number): ToolResult {
+export function fromExec(
+  result: ExecResult,
+  header?: string,
+  max?: number,
+): ToolResult {
   // Build the full text and let render() decide what to keep, so the overflow
   // store receives everything rather than an already-truncated copy.
   const text = formatResult(result, header, BUILD_CAP);
@@ -109,7 +123,10 @@ export function fromExec(result: ExecResult, header?: string, max?: number): Too
 }
 
 /** Report the shell result without treating non-zero exit as failure. */
-export function fromExecLenient(result: ExecResult, header?: string): ToolResult {
+export function fromExecLenient(
+  result: ExecResult,
+  header?: string,
+): ToolResult {
   return ok(formatResult(result, header, BUILD_CAP));
 }
 
@@ -128,21 +145,30 @@ export class ReadOnlyError extends Error {
  */
 export function assertWritable(tool: string): void {
   if (config.hostReadOnly) {
-    throw new ReadOnlyError(tool, config.readOnly ? "readOnly" : "hostReadOnly");
+    throw new ReadOnlyError(
+      tool,
+      config.readOnly ? "readOnly" : "hostReadOnly",
+    );
   }
 }
 
 /** Guard for anything that mutates state on GitHub rather than on this host. */
 export function assertGithubWritable(tool: string): void {
   if (config.githubReadOnly) {
-    throw new ReadOnlyError(tool, config.readOnly ? "readOnly" : "githubReadOnly");
+    throw new ReadOnlyError(
+      tool,
+      config.readOnly ? "readOnly" : "githubReadOnly",
+    );
   }
 }
 
 /** Guard for anything that mutates state at a cloud provider rather than on this host. */
 export function assertCloudWritable(tool: string): void {
   if (config.cloudReadOnly) {
-    throw new ReadOnlyError(tool, config.readOnly ? "readOnly" : "cloudReadOnly");
+    throw new ReadOnlyError(
+      tool,
+      config.readOnly ? "readOnly" : "cloudReadOnly",
+    );
   }
 }
 

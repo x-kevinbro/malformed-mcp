@@ -15,12 +15,14 @@ import {
   acceptsEmail,
   effectiveAuth,
   providerSpec,
-  PROVIDERS,
+  allProviderSpecs,
   type ProviderSpec,
 } from "../providers/spec.js";
+import { customProviderSpec } from "../providers/custom.js";
 import { googleAccessToken, resolveTarget } from "../providers/request.js";
 import {
   allAccounts,
+  findAccount,
   defaultAccountId,
   removeAccount,
   rotateMcpToken,
@@ -38,6 +40,18 @@ export function dig(value: unknown, path: string): string | undefined {
     node = /^\d+$/.test(part) ? node[Number(part)] : node[part];
   }
   return typeof node === "string" && node ? node : undefined;
+}
+
+/** Metadata reaches agents; inspect string values without JSON escaping the secret. */
+function metadataContainsCredential(value: unknown, token: string): boolean {
+  if (typeof value === "string") return value.includes(token);
+  if (Array.isArray(value))
+    return value.some((item) => metadataContainsCredential(item, token));
+  if (value && typeof value === "object")
+    return Object.values(value).some((item) =>
+      metadataContainsCredential(item, token),
+    );
+  return false;
 }
 
 /**
@@ -62,7 +76,9 @@ async function verifyCredential(
       headers = { Authorization: `Bearer ${token}` };
       break;
     case "header":
-      headers = { [style.header]: token };
+      headers = {
+        [style.header]: `${style.prefix ? style.prefix + " " : ""}${token}`,
+      };
       break;
     case "email_key":
       headers = { "X-Auth-Email": extra?.email ?? "", "X-Auth-Key": token };
@@ -78,6 +94,7 @@ async function verifyCredential(
 
   const response = await fetch(resolveTarget(spec, check.path), {
     method: check.method ?? "GET",
+    redirect: "error",
     headers: {
       ...headers,
       Accept: "application/json",
@@ -104,10 +121,25 @@ async function verifyCredential(
 
 export function cloudApiRouter(): Router {
   const r = Router();
+  // Signed-in panel sessions are enforced by the parent router. Mutations also
+  // require the panel's own origin; credentials must never travel via a URL.
+  r.use("/api/cloud", (req, res, next) => {
+    res.set("Cache-Control", "no-store");
+    if (
+      !["GET", "HEAD", "OPTIONS"].includes(req.method) &&
+      req.get("origin") !== `${req.protocol}://${req.get("host")}`
+    ) {
+      res
+        .status(403)
+        .json({ error: "Cloud settings must be submitted from this panel." });
+      return;
+    }
+    next();
+  });
 
   r.get("/api/cloud", (_req, res) => {
     res.json({
-      providers: PROVIDERS.map((spec) => ({
+      providers: allProviderSpecs().map((spec) => ({
         id: spec.id,
         name: spec.name,
         baseUrl: spec.baseUrl,
@@ -126,9 +158,6 @@ export function cloudApiRouter(): Router {
         verified: a.verified,
         createdAt: a.createdAt,
         isDefault: defaultAccountId(a.provider) === a.id,
-        // The MCP token is meant to be copied out and handed to an agent, so
-        // unlike the provider credential it is returned to a signed-in operator.
-        mcpToken: a.mcpToken,
       })),
     });
   });
@@ -139,13 +168,21 @@ export function cloudApiRouter(): Router {
     const token = String(body.token ?? "").trim();
     const email = String(body.email ?? "").trim();
     const requestedName = String(body.name ?? "").trim();
-    const readOnly = Boolean(body.readOnly);
+    const readOnly = body.readOnly !== false;
 
     let spec: ProviderSpec;
     try {
-      spec = providerSpec(providerId);
+      spec =
+        providerId === "custom"
+          ? customProviderSpec(body.custom)
+          : providerSpec(providerId);
     } catch (error) {
-      res.status(400).json({ error: (error as Error).message });
+      res.status(400).json({
+        error:
+          providerId === "custom"
+            ? (error as Error).message
+            : "Choose a supported provider or configure a Custom API.",
+      });
       return;
     }
     if (!token) {
@@ -168,6 +205,22 @@ export function cloudApiRouter(): Router {
       return;
     }
 
+    if (effectiveAuth(spec).type !== "google_sa" && /[\r\n\x00]/.test(token)) {
+      res.status(400).json({
+        error:
+          "An access token must be a single line without control characters.",
+      });
+      return;
+    }
+    // Metadata is returned to agents; never allow accidental credential pastes
+    // into the account name, provider name, URL or header configuration.
+    if (metadataContainsCredential([requestedName, email, spec], token)) {
+      res.status(400).json({
+        error:
+          "Put the credential only in the secret token field, not in account or API settings.",
+      });
+      return;
+    }
     try {
       const extra = email ? { email } : undefined;
       const check = await verifyCredential(spec, token, extra);
@@ -178,11 +231,14 @@ export function cloudApiRouter(): Router {
         return;
       }
 
+      if (check.name?.includes(token))
+        throw new Error("Provider returned a credential as account metadata.");
       const name = requestedName || check.name || "default";
       const account = upsertAccount({
         provider: spec.id,
         name,
         token,
+        ...(spec.id.startsWith("custom-") ? { customProvider: spec } : {}),
         extra,
         readOnly,
         verified: check.verified,
@@ -197,11 +253,29 @@ export function cloudApiRouter(): Router {
         id: account.id,
         name: account.name,
         verified: check.verified,
-        mcpToken: account.mcpToken,
       });
-    } catch (error) {
-      res.status(400).json({ error: (error as Error).message.slice(0, 400) });
+    } catch {
+      // Verification happens before the credential is registered for redaction.
+      // Upstream errors can echo it, so never return their raw text.
+      res.status(400).json({
+        error:
+          "Could not verify or store this credential. Check its format, provider availability and server storage permissions.",
+      });
     }
+  });
+
+  // Explicit operator-only copy action. Never included in page HTML, account
+  // listings or MCP tool results. This bearer token is itself a secret.
+  r.post("/api/cloud/accounts/:provider/:slug/mcp-token", (req, res) => {
+    const account = findAccount(
+      String(req.params.provider),
+      String(req.params.slug),
+    );
+    if (!account) {
+      res.status(404).json({ error: "No such account." });
+      return;
+    }
+    res.json({ mcpToken: account.mcpToken });
   });
 
   r.delete("/api/cloud/accounts/:provider/:slug", (req, res) => {
@@ -222,15 +296,12 @@ export function cloudApiRouter(): Router {
 
   r.post("/api/cloud/accounts/:provider/:slug/rotate", (req, res) => {
     try {
-      const mcpToken = rotateMcpToken(
-        String(req.params.provider),
-        String(req.params.slug),
-      );
+      rotateMcpToken(String(req.params.provider), String(req.params.slug));
       audit("cloud_token_rotated", {
         provider: req.params.provider,
         slug: req.params.slug,
       });
-      res.json({ ok: true, mcpToken });
+      res.json({ ok: true });
     } catch (error) {
       res.status(404).json({ error: (error as Error).message });
     }

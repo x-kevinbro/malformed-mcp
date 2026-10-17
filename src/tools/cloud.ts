@@ -13,7 +13,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { defineTool, registerTools } from "../tool.js";
 import { assertCloudWritable } from "../result.js";
-import { PROVIDERS, providerSpec } from "../providers/spec.js";
+import { allProviderSpecs, providerSpec } from "../providers/spec.js";
 import { resolveAccount, visibleAccounts } from "../providers/accounts.js";
 import { defaultAccountId } from "../providers/store.js";
 import { cloudFetch, describeCloudFailure } from "../providers/request.js";
@@ -26,16 +26,17 @@ const providersTool = defineTool({
   name: "cloud_providers",
   title: "List the cloud providers and accounts this server knows",
   description:
-    "Lists every provider this server can call (Vercel, Heroku, Render, DigitalOcean, Linode, " +
-    "Fastly, Cloudflare, Firebase, Turso), which accounts are configured for each, and how to " +
+    "Lists built-in providers (including Koyeb) and custom HTTPS APIs configured in the panel, " +
+    "which accounts are available for each, and how to " +
     "authenticate the call. Accounts are added in the web panel, Cloud Providers tab - an agent " +
     "cannot add one itself. Use cloud_request for the actual call.",
   readOnly: true,
   input: {},
   run() {
     const lines: string[] = [];
-    for (const spec of PROVIDERS) {
+    for (const spec of allProviderSpecs()) {
       const accounts = visibleAccounts(spec.id);
+      if (spec.id.startsWith("custom-") && !accounts.length) continue;
       const fallback = defaultAccountId(spec.id);
       lines.push(`${spec.id} - ${spec.name} (${spec.baseUrl})`);
       if (spec.docsUrl) lines.push(`  docs: ${spec.docsUrl}`);
@@ -80,7 +81,7 @@ const requestTool = defineTool({
     provider: z
       .string()
       .describe(
-        `Provider id. One of: ${PROVIDERS.map((p) => p.id).join(", ")}.`,
+        "Provider id from cloud_providers, including configured custom APIs. Never supply a token.",
       ),
     account: z
       .string()
@@ -111,8 +112,8 @@ const requestTool = defineTool({
       .describe("JSON request body for POST/PUT/PATCH."),
   },
   async run({ provider, account, method, path, query, body }) {
-    const spec = providerSpec(provider);
-    const acct = resolveAccount(spec.id, account);
+    const acct = resolveAccount(provider.trim().toLowerCase(), account);
+    const spec = providerSpec(acct.provider);
     const verb = method.toUpperCase();
 
     if (!SAFE_METHODS.has(verb)) {

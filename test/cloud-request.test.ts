@@ -40,6 +40,7 @@ test("every provider spec is internally consistent", () => {
   }
   // The providers this feature was requested for are all present.
   for (const id of [
+    "koyeb",
     "vercel",
     "heroku",
     "render",
@@ -119,9 +120,9 @@ test("dig walks dotted paths, including array indexes", () => {
   assert.equal(dig(null, "anything"), undefined);
 });
 
-test("unknown provider errors name the ones that exist", () => {
+test("unknown provider errors direct users to the private panel", () => {
   assert.throws(
     () => providerSpec("azure"),
-    /Unknown provider "azure".*vercel/s,
+    /Unknown provider "azure".*Never paste credentials/s,
   );
 });
