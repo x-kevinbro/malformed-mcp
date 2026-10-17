@@ -67,6 +67,11 @@ export function resolveAccount(
   name?: string,
 ): StoredCloudAccount {
   const lock = locked.getStore();
+  if (lock && findAccountById(lock)?.provider !== provider) {
+    throw new Error(
+      "No cloud account is available for that provider in this session.",
+    );
+  }
 
   if (!name) {
     const lockedAccount = lock ? findAccountById(lock) : undefined;

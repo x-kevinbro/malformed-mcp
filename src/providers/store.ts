@@ -21,6 +21,7 @@ import {
 import { randomBytes } from "node:crypto";
 import path from "node:path";
 import { config } from "../config.js";
+import type { ProviderSpec } from "./spec.js";
 
 export type StoredCloudAccount = {
   /** `${provider}/${slug(name)}` - the stable identity, used by the auth lock. */
@@ -28,8 +29,10 @@ export type StoredCloudAccount = {
   provider: string;
   /** Display name: the email, username or label the verify call returned. */
   name: string;
-  /** The credential itself. Never leaves the server. For google_sa, the JSON key. */
+  /** Secret attached server-side only to permitted API requests; never returned to agents. */
   token: string;
+  /** Operator-defined API destination/auth metadata; never contains the credential. */
+  customProvider?: ProviderSpec;
   /** Secondary fields - currently just { email } for a Cloudflare global key. */
   extra?: Record<string, string>;
   /** Per-account write gate: true blocks every non-GET cloud_request. */
