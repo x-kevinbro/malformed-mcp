@@ -22,6 +22,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
 
 PORT=40000
+PORT_GIVEN=0
 SERVICE=malformed-mcp
 DOMAIN=""
 EMAIL=""
@@ -60,7 +61,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --domain) DOMAIN="${2:-}"; shift 2 ;;
     --email)  EMAIL="${2:-}";  shift 2 ;;
-    --port)   PORT="${2:-}";   shift 2 ;;
+    --port)   PORT="${2:-}"; PORT_GIVEN=1; shift 2 ;;
     --no-cert) WANT_CERT=0; shift ;;
     --yes|-y) ASSUME_YES=1; shift ;;
     --nginx)  USE_NGINX=1; shift ;;
@@ -68,6 +69,16 @@ while [[ $# -gt 0 ]]; do
     *) die "unknown option: $1" ;;
   esac
 done
+
+[[ "$PORT" =~ ^[0-9]+$ ]] || { echo "--port must be a number" >&2; exit 1; }
+
+# The panel can change the port (runtime/settings.json, read by config.ts at
+# boot). Unless --port was given, follow that file so the health check and the
+# nginx upstream point at the port the app really listens on.
+if [[ $PORT_GIVEN -eq 0 && -f "$ROOT_DIR/runtime/settings.json" ]] && command -v python3 >/dev/null 2>&1; then
+  SAVED_PORT="$(python3 -c 'import json,sys; p=json.load(open(sys.argv[1])).get("port"); print(p if isinstance(p,int) else "")' "$ROOT_DIR/runtime/settings.json" 2>/dev/null || true)"
+  [[ -n "$SAVED_PORT" ]] && PORT="$SAVED_PORT"
+fi
 
 # nginx proxies to the app's TLS listener and checks its certificate, so this
 # mode cannot work without one.
@@ -371,20 +382,24 @@ ok "new panel password generated (20 characters) - shown at the end"
 
 # ------------------------------------------------------------- listen address
 # runtime/settings.json is the operator overlay read at boot (see config.ts).
-# Only the bind key is touched; anything else set from the panel is kept.
-set_bind() {
+# Only the given key is touched; anything else set from the panel is kept.
+set_setting() {
   node -e '
     const fs = require("node:fs");
-    const [file, bind] = process.argv.slice(1);
+    const [file, key, raw] = process.argv.slice(1);
     let cur = {};
     try { cur = JSON.parse(fs.readFileSync(file, "utf8")); } catch {}
-    cur.bind = bind;
+    cur[key] = /^[0-9]+$/.test(raw) ? Number(raw) : raw;
     fs.writeFileSync(file, JSON.stringify(cur, null, 2) + "\n", { mode: 0o600 });
-  ' "$ROOT_DIR/runtime/settings.json" "$1" 2>>"$LOG"
+  ' "$ROOT_DIR/runtime/settings.json" "$1" "$2" 2>>"$LOG"
 }
+if [[ $PORT_GIVEN -eq 1 ]]; then
+  set_setting port "$PORT" || die "could not write runtime/settings.json"
+  ok "app port set to ${PORT}"
+fi
 if [[ $USE_NGINX -eq 1 ]]; then
   step "Binding the app to 127.0.0.1"
-  set_bind 127.0.0.1 || die "could not write runtime/settings.json"
+  set_setting bind 127.0.0.1 || die "could not write runtime/settings.json"
   ok "only nginx can reach :${PORT}; the public entry point is :443"
 fi
 
