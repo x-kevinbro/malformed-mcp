@@ -13,6 +13,8 @@
 #   ./deploy.sh                                    interactive
 #   ./deploy.sh --domain mcp.x.com --email me@x.com  unattended
 #   ./deploy.sh --no-cert                          skip TLS entirely
+#   ./deploy.sh --domain mcp.x.com --nginx         serve on :443 through nginx,
+#                                                  sharing 80/443 with other sites
 #
 set -Eeuo pipefail
 
@@ -25,6 +27,9 @@ DOMAIN=""
 EMAIL=""
 WANT_CERT=1
 ASSUME_YES=0
+# --nginx: put the app behind nginx on :80/:443 and bind it to 127.0.0.1 only.
+# nginx keeps running the whole time, so other sites on the box stay up.
+USE_NGINX=0
 LOG="$ROOT_DIR/runtime/install.log"
 
 mkdir -p "$ROOT_DIR/runtime"
@@ -58,10 +63,18 @@ while [[ $# -gt 0 ]]; do
     --port)   PORT="${2:-}";   shift 2 ;;
     --no-cert) WANT_CERT=0; shift ;;
     --yes|-y) ASSUME_YES=1; shift ;;
-    -h|--help) sed -n '2,14p' "$0"; exit 0 ;;
+    --nginx)  USE_NGINX=1; shift ;;
+    -h|--help) sed -n '2,16p' "$0"; exit 0 ;;
     *) die "unknown option: $1" ;;
   esac
 done
+
+# nginx proxies to the app's TLS listener and checks its certificate, so this
+# mode cannot work without one.
+if [[ $USE_NGINX -eq 1 && $WANT_CERT -eq 0 ]]; then
+  echo "--nginx needs a certificate; it cannot be combined with --no-cert" >&2
+  exit 1
+fi
 
 printf '\n%sMalformed-MCP installer%s\n\n' "$B" "$R"
 
@@ -276,36 +289,48 @@ start_mcp_units() {
 }
 
 # --------------------------------------------------------------------- portal
-step "Opening port $PORT"
-if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then
-  run ufw allow "${PORT}/tcp"
-  ok "ufw: allowed ${PORT}/tcp"
-fi
-if command -v iptables >/dev/null 2>&1; then
-  if iptables -C INPUT -p tcp --dport "$PORT" -j ACCEPT 2>/dev/null; then
-    ok "iptables: ${PORT}/tcp already allowed"
-  else
-    # The chain may end in a catch-all REJECT. Appending after it would have no
-    # effect, so the rule goes in immediately before it when one exists.
-    REJECT_LINE="$(iptables -L INPUT --line-numbers -n 2>/dev/null | awk '$2=="REJECT"{print $1; exit}')"
-    if [[ -n "$REJECT_LINE" ]]; then
-      run iptables -I INPUT "$REJECT_LINE" -p tcp --dport "$PORT" -j ACCEPT
-      ok "iptables: inserted ACCEPT at position $REJECT_LINE, before the REJECT"
+open_port() {
+  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then
+    run ufw allow "${1}/tcp"
+    ok "ufw: allowed ${1}/tcp"
+  fi
+  if command -v iptables >/dev/null 2>&1; then
+    if iptables -C INPUT -p tcp --dport "$1" -j ACCEPT 2>/dev/null; then
+      ok "iptables: ${1}/tcp already allowed"
     else
-      run iptables -I INPUT 1 -p tcp --dport "$PORT" -j ACCEPT
-      ok "iptables: inserted ACCEPT at the top of INPUT"
-    fi
-    if command -v netfilter-persistent >/dev/null 2>&1; then
-      run netfilter-persistent save && ok "iptables rules persisted"
-    elif [[ -f /etc/sysconfig/iptables ]] && command -v service >/dev/null 2>&1; then
-      run service iptables save && ok "iptables rules persisted"
-    else
-      warn "could not persist iptables rules - they will be lost on reboot"
-      warn "install iptables-persistent to make this permanent"
+      # The chain may end in a catch-all REJECT. Appending after it would have no
+      # effect, so the rule goes in immediately before it when one exists.
+      REJECT_LINE="$(iptables -L INPUT --line-numbers -n 2>/dev/null | awk '$2=="REJECT"{print $1; exit}')"
+      if [[ -n "$REJECT_LINE" ]]; then
+        run iptables -I INPUT "$REJECT_LINE" -p tcp --dport "$1" -j ACCEPT
+        ok "iptables: inserted ACCEPT at position $REJECT_LINE, before the REJECT"
+      else
+        run iptables -I INPUT 1 -p tcp --dport "$1" -j ACCEPT
+        ok "iptables: inserted ACCEPT at the top of INPUT"
+      fi
+      if command -v netfilter-persistent >/dev/null 2>&1; then
+        run netfilter-persistent save && ok "iptables rules persisted"
+      elif [[ -f /etc/sysconfig/iptables ]] && command -v service >/dev/null 2>&1; then
+        run service iptables save && ok "iptables rules persisted"
+      else
+        warn "could not persist iptables rules - they will be lost on reboot"
+        warn "install iptables-persistent to make this permanent"
+      fi
     fi
   fi
+}
+
+if [[ $USE_NGINX -eq 1 ]]; then
+  # The app only listens on 127.0.0.1 in this mode; nginx owns the public ports.
+  step "Opening ports 80 and 443"
+  open_port 80
+  open_port 443
+  warn "if this machine sits behind a cloud firewall or security list, open 80/tcp and 443/tcp there too"
+else
+  step "Opening port $PORT"
+  open_port "$PORT"
+  warn "if this machine sits behind a cloud firewall or security list, open ${PORT}/tcp there too"
 fi
-warn "if this machine sits behind a cloud firewall or security list, open ${PORT}/tcp there too"
 
 # -------------------------------------------------------------------- service
 step "Installing the systemd service"
@@ -343,6 +368,25 @@ PANEL_PASSWORD="$(echo "$PANEL_PASSWORD_RAW" | grep -E '^PANEL_PASSWORD::' | tai
 # which is worse than failing the install.
 [[ -n "$PANEL_PASSWORD" ]] || die "the panel password generator returned nothing"
 ok "new panel password generated (20 characters) - shown at the end"
+
+# ------------------------------------------------------------- listen address
+# runtime/settings.json is the operator overlay read at boot (see config.ts).
+# Only the bind key is touched; anything else set from the panel is kept.
+set_bind() {
+  node -e '
+    const fs = require("node:fs");
+    const [file, bind] = process.argv.slice(1);
+    let cur = {};
+    try { cur = JSON.parse(fs.readFileSync(file, "utf8")); } catch {}
+    cur.bind = bind;
+    fs.writeFileSync(file, JSON.stringify(cur, null, 2) + "\n", { mode: 0o600 });
+  ' "$ROOT_DIR/runtime/settings.json" "$1" 2>>"$LOG"
+}
+if [[ $USE_NGINX -eq 1 ]]; then
+  step "Binding the app to 127.0.0.1"
+  set_bind 127.0.0.1 || die "could not write runtime/settings.json"
+  ok "only nginx can reach :${PORT}; the public entry point is :443"
+fi
 
 # ---------------------------------------------------------------------- start
 step "Starting Malformed-MCP"
@@ -409,43 +453,53 @@ if [[ $WANT_CERT -eq 1 && -n "$DOMAIN" && -z "$EMAIL" && $ASSUME_YES -eq 0 && -t
   read -r EMAIL
 fi
 
-if [[ $WANT_CERT -eq 1 && -n "$DOMAIN" ]]; then
+if [[ $USE_NGINX -eq 1 && -z "$DOMAIN" ]]; then
+  DOMAIN="$EXISTING_CERT_DOMAIN"
+  [[ -n "$DOMAIN" ]] || die "--nginx needs a domain (pass --domain mcp.example.com)"
+fi
+
+if [[ $WANT_CERT -eq 1 && -n "$DOMAIN" && ( $USE_NGINX -eq 0 || "$DOMAIN" != "$EXISTING_CERT_DOMAIN" ) ]]; then
   step "Issuing a certificate for $DOMAIN"
 
-  # Check if port 80 is occupied and force-free it
-  PORT80_PID=""
-  if command -v fuser >/dev/null 2>&1; then
-    PORT80_PID="$(fuser 80/tcp 2>/dev/null || true)"
-  elif command -v lsof >/dev/null 2>&1; then
-    PORT80_PID="$(lsof -t -i:80 2>/dev/null || true)"
-  elif command -v ss >/dev/null 2>&1; then
-    PORT80_PID="$(ss -tulpn '( sport = :80 )' 2>/dev/null | grep -o 'pid=[0-9]*' | cut -d= -f2 | tr '\n' ' ' || true)"
+  # With --nginx the other sites behind nginx must stay up. The app borrows
+  # :80/:443 with a short iptables redirect instead, so nothing is stopped.
+  if [[ $USE_NGINX -eq 0 ]]; then
+    # Check if port 80 is occupied and force-free it
+    PORT80_PID=""
+    if command -v fuser >/dev/null 2>&1; then
+      PORT80_PID="$(fuser 80/tcp 2>/dev/null || true)"
+    elif command -v lsof >/dev/null 2>&1; then
+      PORT80_PID="$(lsof -t -i:80 2>/dev/null || true)"
+    elif command -v ss >/dev/null 2>&1; then
+      PORT80_PID="$(ss -tulpn '( sport = :80 )' 2>/dev/null | grep -o 'pid=[0-9]*' | cut -d= -f2 | tr '\n' ' ' || true)"
+    fi
+
+    if [[ -n "$PORT80_PID" ]]; then
+      printf '  %s! Port 80 is occupied (PID: %s) — freeing port 80 for ACME challenge...%s\n' "$E" "$PORT80_PID" "$R"
+    fi
+
+    # Force free port 80
+    FREE_EXECUTED=0
+    if command -v fuser >/dev/null 2>&1; then
+      fuser -k -9 80/tcp >/dev/null 2>&1 || true
+      FREE_EXECUTED=1
+    fi
+    if command -v lsof >/dev/null 2>&1; then
+      lsof -t -i:80 2>/dev/null | xargs -r kill -9 2>/dev/null || true
+      FREE_EXECUTED=1
+    fi
+    # Stop background webservers that may grab port 80
+    if command -v systemctl >/dev/null 2>&1; then
+      systemctl stop nginx >/dev/null 2>&1 || true
+      systemctl stop apache2 >/dev/null 2>&1 || true
+      systemctl stop httpd >/dev/null 2>&1 || true
+    fi
+
+    if [[ -n "$PORT80_PID" || $FREE_EXECUTED -eq 1 ]]; then
+      ok "port 80 force-free command has been executed"
+    fi
   fi
 
-  if [[ -n "$PORT80_PID" ]]; then
-    printf '  %s! Port 80 is occupied (PID: %s) — freeing port 80 for ACME challenge...%s\n' "$E" "$PORT80_PID" "$R"
-  fi
-
-  # Force free port 80
-  FREE_EXECUTED=0
-  if command -v fuser >/dev/null 2>&1; then
-    fuser -k -9 80/tcp >/dev/null 2>&1 || true
-    FREE_EXECUTED=1
-  fi
-  if command -v lsof >/dev/null 2>&1; then
-    lsof -t -i:80 2>/dev/null | xargs -r kill -9 2>/dev/null || true
-    FREE_EXECUTED=1
-  fi
-  # Stop background webservers that may grab port 80
-  if command -v systemctl >/dev/null 2>&1; then
-    systemctl stop nginx >/dev/null 2>&1 || true
-    systemctl stop apache2 >/dev/null 2>&1 || true
-    systemctl stop httpd >/dev/null 2>&1 || true
-  fi
-
-  if [[ -n "$PORT80_PID" || $FREE_EXECUTED -eq 1 ]]; then
-    ok "port 80 force-free command has been executed"
-  fi
   # Ask the app, not acme.sh directly: it does the DNS pre-check first, then
   # tries HTTP-01, TLS-ALPN-01 and DNS-01 in turn, borrowing :80 and :443 for
   # only as long as the challenge takes.
@@ -486,8 +540,141 @@ else
   CERT_NOTE="No domain given, so the panel is served over plain HTTP."
 fi
 
+# ---------------------------------------------------------------------- nginx
+setup_nginx() {
+  local domain="$1"
+  local cert_dir="$ROOT_DIR/runtime/certs/$domain"
+  local site="/etc/nginx/sites-available/$domain"
+  local unit="malformed-mcp-nginx-reload"
+
+  [[ -s "$cert_dir/fullchain.pem" && -s "$cert_dir/key.pem" ]] \
+    || die "no certificate for $domain in $cert_dir - nginx was not changed"
+
+  if ! command -v nginx >/dev/null 2>&1; then
+    pkg_install nginx
+    ok "nginx installed"
+  fi
+
+  # Debian layout first; RHEL-style hosts only have conf.d.
+  if [[ -d /etc/nginx/sites-available ]]; then
+    mkdir -p /etc/nginx/sites-enabled
+  else
+    site="/etc/nginx/conf.d/$domain.conf"
+  fi
+
+  # Keep whatever was there, so a bad render can be put back.
+  local backup=""
+  if [[ -f "$site" ]]; then
+    backup="$ROOT_DIR/runtime/backups/nginx-$domain.$(date +%s)"
+    mkdir -p "$ROOT_DIR/runtime/backups"
+    cp -a "$site" "$backup"
+  fi
+
+  cat > "$site" <<NGINX
+# Managed by Malformed-MCP deploy.sh --nginx. Re-running the installer rewrites it.
+server {
+    listen 80;
+    listen [::]:80;
+    server_name $domain;
+    return 308 https://$domain\$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    server_name $domain;
+
+    ssl_certificate     $cert_dir/fullchain.pem;
+    ssl_certificate_key $cert_dir/key.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_session_cache shared:malformed_mcp:1m;
+
+    access_log /var/log/nginx/malformed-mcp-access.log;
+    error_log  /var/log/nginx/malformed-mcp-error.log;
+    client_max_body_size 128m;
+
+    location / {
+        proxy_pass https://127.0.0.1:$PORT;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header Connection "";
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$remote_addr;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header X-Forwarded-Host \$host;
+        proxy_set_header X-Forwarded-Port \$server_port;
+
+        proxy_ssl_server_name on;
+        proxy_ssl_name $domain;
+
+        # MCP responses and heartbeat streams must reach clients immediately.
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_cache off;
+        proxy_set_header Accept-Encoding "";
+        gzip off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+        send_timeout 3600s;
+    }
+}
+NGINX
+  if [[ "$site" == /etc/nginx/sites-available/* ]]; then
+    ln -sf "$site" "/etc/nginx/sites-enabled/$domain"
+  fi
+
+  # Never reload a config that does not parse: the other sites depend on it.
+  if ! nginx -t >>"$LOG" 2>&1; then
+    if [[ -n "$backup" ]]; then cp -a "$backup" "$site"; else rm -f "$site" "/etc/nginx/sites-enabled/$domain"; fi
+    die "nginx rejected the new site, so it was rolled back and nginx was not reloaded"
+  fi
+  if systemctl is-active --quiet nginx; then
+    run systemctl reload nginx
+  else
+    run systemctl enable --now nginx
+  fi
+  ok "nginx serves https://$domain on :443"
+
+  # Renewals rewrite the certificate files; reload nginx gracefully when they do.
+  if [[ $HAVE_SYSTEMD -eq 1 ]]; then
+    cat > "/etc/systemd/system/$unit.service" <<UNIT
+[Unit]
+Description=Reload nginx after the Malformed-MCP certificate changes
+After=nginx.service
+
+[Service]
+Type=oneshot
+ExecStartPre=/usr/bin/sleep 2
+ExecStart=$(command -v nginx) -t
+ExecStart=$(command -v systemctl) reload nginx.service
+UNIT
+    cat > "/etc/systemd/system/$unit.path" <<UNIT
+[Unit]
+Description=Watch the Malformed-MCP certificate for renewals
+
+[Path]
+PathChanged=$cert_dir/fullchain.pem
+PathChanged=$cert_dir/key.pem
+Unit=$unit.service
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+    run systemctl daemon-reload
+    run systemctl enable --now "$unit.path"
+    ok "nginx reloads automatically when the certificate renews"
+  fi
+}
+
+PUBLIC_PORT=":${PORT}"
+if [[ $USE_NGINX -eq 1 ]]; then
+  step "Configuring nginx for $DOMAIN"
+  setup_nginx "$DOMAIN"
+  SCHEME=https; HOST="$DOMAIN"; PUBLIC_PORT=""
+fi
+
 # --------------------------------------------------------------------- report
-URL="${SCHEME}://${HOST}:${PORT}"
+URL="${SCHEME}://${HOST}${PUBLIC_PORT}"
 
 printf '\n'
 printf '%s================================================================%s\n' "$G" "$R"
