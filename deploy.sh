@@ -638,11 +638,25 @@ NGINX
     ln -sf "$site" "/etc/nginx/sites-enabled/$domain"
   fi
 
+  # Some installers (VPN/tunnel scripts) ship an nginx.conf that never includes
+  # sites-enabled/. The site would then be silently ignored and another
+  # server block would answer for this domain with its own certificate.
+  # conf.d/*.conf is included by every stock and most custom layouts.
+  if [[ "$site" == /etc/nginx/sites-available/* ]] \
+     && ! nginx -T 2>/dev/null | grep -qF "server_name $domain;"; then
+    rm -f "/etc/nginx/sites-enabled/$domain"
+    mkdir -p /etc/nginx/conf.d
+    ln -sf "$site" "/etc/nginx/conf.d/$domain.conf"
+    warn "nginx.conf does not load sites-enabled/ - linked the site into conf.d/ instead"
+  fi
+
   # Never reload a config that does not parse: the other sites depend on it.
   if ! nginx -t >>"$LOG" 2>&1; then
-    if [[ -n "$backup" ]]; then cp -a "$backup" "$site"; else rm -f "$site" "/etc/nginx/sites-enabled/$domain"; fi
+    if [[ -n "$backup" ]]; then cp -a "$backup" "$site"; else rm -f "$site" "/etc/nginx/sites-enabled/$domain" "/etc/nginx/conf.d/$domain.conf"; fi
     die "nginx rejected the new site, so it was rolled back and nginx was not reloaded"
   fi
+  nginx -T 2>/dev/null | grep -qF "server_name $domain;" \
+    || die "nginx does not load the site for $domain - check the include lines in nginx.conf"
   if systemctl is-active --quiet nginx; then
     run systemctl reload nginx
   else
